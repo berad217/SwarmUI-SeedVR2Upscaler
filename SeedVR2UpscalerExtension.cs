@@ -301,7 +301,6 @@ public class SeedVR2UpscalerExtension : Extension
             "The slider UI is capped at 4.0, but you can type a higher value if desired.\n" +
             "Ignored if 'SeedVR2 Resolution' is set.",
             "1",
-            IgnoreIf: "1",
             Min: 1, Max: 16, ViewMax: 4, Step: 0.25,
             ViewType: ParamViewType.SLIDER,
             Group: SeedVR2Group,
@@ -1000,7 +999,8 @@ public class SeedVR2UpscalerExtension : Extension
         // Determine model variant and settings from SeedVR2Model parameter
         string modelChoice = g.UserInput.Get(SeedVR2Model, "seedvr2-preset-balanced");
         string modelKey = modelChoice.Before("///");
-        if (string.IsNullOrEmpty(modelKey) || !modelKey.StartsWith("seedvr2-"))
+        // Validate: must be non-empty and exist in the model map (handles presets, named models, and user-added filenames)
+        if (string.IsNullOrEmpty(modelKey) || !DiTModelMap.ContainsKey(modelKey) && !QualityPresets.ContainsKey(modelKey) && modelKey != "seedvr2-auto")
         {
             modelKey = "seedvr2-preset-balanced";
         }
@@ -1046,22 +1046,44 @@ public class SeedVR2UpscalerExtension : Extension
         // Calculate target resolution based on upscale factor or direct resolution setting
         double seedvrUpscaleBy = g.UserInput.Get(SeedVR2UpscaleBy, 1.5);
         int resolution;
+        int outWidth = 0, outHeight = 0;
         // Check if user specified a direct resolution target
         bool directResolutionMode = g.UserInput.TryGet(SeedVR2Resolution, out int userResolution) && userResolution > 0;
         if (directResolutionMode)
         {
             resolution = userResolution;
+            // Calculate actual output dimensions from shortest-edge target
+            if (origWidth > 0 && origHeight > 0)
+            {
+                if (origWidth <= origHeight)
+                {
+                    outWidth = resolution;
+                    outHeight = (int)Math.Round(origHeight * (resolution / (double)origWidth));
+                }
+                else
+                {
+                    outHeight = resolution;
+                    outWidth = (int)Math.Round(origWidth * (resolution / (double)origHeight));
+                }
+            }
         }
         else if (origWidth > 0 && origHeight > 0)
         {
-            int targetWidth = (int)Math.Round(origWidth * seedvrUpscaleBy);
-            int targetHeight = (int)Math.Round(origHeight * seedvrUpscaleBy);
-            resolution = Math.Min(targetWidth, targetHeight);
+            outWidth = (int)Math.Round(origWidth * seedvrUpscaleBy);
+            outHeight = (int)Math.Round(origHeight * seedvrUpscaleBy);
+            resolution = Math.Min(outWidth, outHeight);
         }
         else
         {
             // Fallback if we couldn't read dimensions
             resolution = (int)(1024 * seedvrUpscaleBy);
+        }
+
+        // Update metadata with actual output dimensions so downstream processes see the correct resolution
+        if (outWidth > 0 && outHeight > 0)
+        {
+            g.UserInput.Set(T2IParamTypes.Width, outWidth);
+            g.UserInput.Set(T2IParamTypes.Height, outHeight);
         }
 
         // Get other parameters

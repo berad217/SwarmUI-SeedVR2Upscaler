@@ -139,6 +139,17 @@ public class SeedVR2UpscalerExtension : Extension
     /// <summary>Temporary storage for source EXIF profiles, keyed by request ID. Avoids serialization into image metadata.</summary>
     private static readonly ConcurrentDictionary<long, byte[]> PendingSourceExif = new();
 
+    /// <summary>Tracks which completed file-upscale requests should trigger VRAM cleanup in PostBatch (value = true when cache_model is false).</summary>
+    private static readonly ConcurrentDictionary<long, bool> PendingVRAMCleanup = new();
+
+    /// <summary>
+    /// True while a SeedVR2 file-upscale workflow is in flight.
+    /// Set when the workflow starts, cleared in PostBatch.
+    /// If still true at the start of the next upscale, the previous job was cancelled
+    /// without cleanup - we use this to trigger a deferred VRAM flush.
+    /// </summary>
+    private static volatile bool SeedVR2FileUpscaleDidStart = false;
+
     /// <summary>Tracks workflow generators where the pre-video image upscale (priority 6) actually ran, so priority 15 can skip.</summary>
     private static readonly ConditionalWeakTable<WorkflowGenerator, object> PreVideoUpscaleRan = new();
 
@@ -917,6 +928,24 @@ public class SeedVR2UpscalerExtension : Extension
             throw new SwarmUserErrorException("SeedVR2 Image File upscaling requires SeedVR2 nodes. Please install the ComfyUI-SeedVR2_VideoUpscaler custom node.");
         }
 
+        // Deferred cancellation cleanup: if the flag is still set the previous upscale was
+        // cancelled before PostBatch could clear it. Flush VRAM now before we load anything new.
+        if (SeedVR2FileUpscaleDidStart)
+        {
+            Logs.Info("SeedVR2: Previous upscale appears to have been cancelled - flushing VRAM before starting new upscale.");
+            _ = Task.WhenAll(ComfyUIBackendExtension.RunningComfyBackends.Select(b => b.FreeMemory(false)));
+        }
+        SeedVR2FileUpscaleDidStart = true;
+
+        // Pre-upscale VRAM flush: unload the currently loaded model (e.g. Flux) so the large
+        // SeedVR2 model has room. KJNodes VRAM_Debug handles this inside the workflow when available;
+        // this call covers the case where KJNodes is not installed.
+        if (!g.Features.Contains("kjnodes"))
+        {
+            Logs.Info("SeedVR2: KJNodes not available - requesting ComfyUI to unload existing models before upscale.");
+            _ = Task.WhenAll(ComfyUIBackendExtension.RunningComfyBackends.Select(b => b.FreeMemory(false)));
+        }
+
         // Strip generation params that are irrelevant to a pure upscale operation.
         // SwarmUI collects ALL current UI state into UserInput before this runs, so without
         // this cleanup the output metadata ends up containing the current UI model, prompt, etc.
@@ -1290,6 +1319,12 @@ public class SeedVR2UpscalerExtension : Extension
 
         // 9. Create save node using proper SwarmUI method for metadata handling (fixes issue #12)
         g.CurrentMedia.SaveOutput(g.CurrentVae, null);
+
+        // 10. Register this request for post-batch VRAM cleanup (skip if user wants model cached)
+        if (!cacheModel)
+        {
+            PendingVRAMCleanup[requestId] = true;
+        }
 
         // Mark workflow as complete - skip all other generation steps
         g.SkipFurtherSteps = true;
@@ -2042,8 +2077,20 @@ public class SeedVR2UpscalerExtension : Extension
     /// <param name="p">The post-batch event parameters.</param>
     private static void HandleSeedVR2PostBatch(T2IEngine.PostBatchEventParams p)
     {
-        // Check if we have stored source EXIF for this request
         long requestId = p.UserInput.UserRequestId;
+
+        // Clear the in-flight flag - this batch completed normally (not cancelled)
+        SeedVR2FileUpscaleDidStart = false;
+
+        // Post-upscale VRAM cleanup: unload the SeedVR2 model so the next operation has full VRAM.
+        // Only runs when cache_model = false (user hasn't explicitly requested caching).
+        if (PendingVRAMCleanup.TryRemove(requestId, out _))
+        {
+            Logs.Info($"SeedVR2: Upscale complete - requesting ComfyUI to unload SeedVR2 model (request {requestId}).");
+            _ = Task.WhenAll(ComfyUIBackendExtension.RunningComfyBackends.Select(b => b.FreeMemory(false)));
+        }
+
+        // Check if we have stored source EXIF for this request
         if (!PendingSourceExif.TryRemove(requestId, out byte[] exifBytes))
         {
             return;

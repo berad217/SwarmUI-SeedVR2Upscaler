@@ -917,6 +917,25 @@ public class SeedVR2UpscalerExtension : Extension
             throw new SwarmUserErrorException("SeedVR2 Image File upscaling requires SeedVR2 nodes. Please install the ComfyUI-SeedVR2_VideoUpscaler custom node.");
         }
 
+        // Strip generation params that are irrelevant to a pure upscale operation.
+        // SwarmUI collects ALL current UI state into UserInput before this runs, so without
+        // this cleanup the output metadata ends up containing the current UI model, prompt, etc.
+        g.UserInput.Remove(T2IParamTypes.Model);
+        g.UserInput.Remove(T2IParamTypes.RefinerModel);
+        g.UserInput.Remove(T2IParamTypes.VAE);
+        g.UserInput.Remove(T2IParamTypes.Prompt);
+        g.UserInput.Remove(T2IParamTypes.NegativePrompt);
+        g.UserInput.Remove(T2IParamTypes.Steps);
+        g.UserInput.Remove(T2IParamTypes.CFGScale);
+        g.UserInput.Remove(T2IParamTypes.Loras);
+        g.UserInput.Remove(T2IParamTypes.LoraWeights);
+        g.UserInput.Remove(T2IParamTypes.LoraTencWeights);
+        g.UserInput.Remove(T2IParamTypes.InitImage);
+        g.UserInput.Remove(T2IParamTypes.AspectRatio);
+        g.UserInput.Remove(T2IParamTypes.SideLength);
+        g.UserInput.Remove(T2IParamTypes.AltResolutionHeightMult);
+        g.UserInput.Remove(T2IParamTypes.RawResolution);
+
         // Get image dimensions to calculate upscaled resolution
         int origWidth = 0, origHeight = 0;
 

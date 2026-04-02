@@ -159,6 +159,63 @@ public class SeedVR2UpscalerExtension : Extension
         return Path.Combine(Program.ServerSettings.Paths.ActualModelRoot, "seedvr2");
     }
 
+    /// <summary>Gets all ComfyUI backend SEEDVR2 model directories (auto-download destinations).</summary>
+    public static List<string> GetComfyUIModelDirectories()
+    {
+        List<string> dirs = [];
+        try
+        {
+            foreach (ComfyUISelfStartBackend backend in Program.Backends.RunningBackendsOfType<ComfyUISelfStartBackend>())
+            {
+                // ComfyUI's Python node uses SEEDVR2 (uppercase) as the folder name
+                string comfyDir = Path.Combine(backend.ComfyPathBase, "models", "SEEDVR2");
+                if (Directory.Exists(comfyDir) && !dirs.Contains(comfyDir, StringComparer.OrdinalIgnoreCase))
+                {
+                    dirs.Add(comfyDir);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"SeedVR2: Could not enumerate ComfyUI backend model dirs: {ex.Message}");
+        }
+        return dirs;
+    }
+
+    /// <summary>Gets all directories where SeedVR2 models may be found (SwarmUI + ComfyUI backend).</summary>
+    public static List<string> GetAllModelDirectories()
+    {
+        List<string> dirs = [GetSeedVR2ModelDirectory()];
+        dirs.AddRange(GetComfyUIModelDirectories());
+        return dirs;
+    }
+
+    /// <summary>Checks whether a model file is fully downloaded in any known model directory.</summary>
+    public static bool IsModelDownloaded(string filename)
+    {
+        foreach (string dir in GetAllModelDirectories())
+        {
+            if (File.Exists(Path.Combine(dir, filename)))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Checks whether a model file has a partial HuggingFace .download file in any known directory.</summary>
+    public static bool IsModelPartiallyDownloaded(string filename)
+    {
+        foreach (string dir in GetAllModelDirectories())
+        {
+            if (File.Exists(Path.Combine(dir, filename + ".download")))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// <summary>Scans the seedvr2 model directory and adds any new model files to DiTModelMap.</summary>
     public static void ScanForDiscoveredModels()
     {
@@ -174,6 +231,7 @@ public class SeedVR2UpscalerExtension : Extension
         HashSet<string> knownFiles = new(DiTModelMap.Values, StringComparer.OrdinalIgnoreCase);
         var discoveredCount = 0;
 
+        // Scan SwarmUI model directory
         foreach (string file in Directory.GetFiles(modelDir))
         {
             string fileName = Path.GetFileName(file);
@@ -185,47 +243,117 @@ public class SeedVR2UpscalerExtension : Extension
 
             // Use filename as both key and value for discovered models
             DiTModelMap[fileName] = fileName;
+            knownFiles.Add(fileName);
             discoveredCount++;
+        }
+
+        // Also scan ComfyUI backend SEEDVR2 directories (auto-download destination)
+        foreach (string comfyDir in GetComfyUIModelDirectories())
+        {
+            try
+            {
+                foreach (string file in Directory.GetFiles(comfyDir))
+                {
+                    string fileName = Path.GetFileName(file);
+
+                    // Skip partial downloads
+                    if (fileName.EndsWith(".download", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string baseName = fileName[..^".download".Length];
+                        Logs.Info($"SeedVR2: Partial download detected: {baseName} (in {comfyDir})");
+                        continue;
+                    }
+
+                    if (!SupportedModelExtensions.Contains(Path.GetExtension(file).ToLowerInvariant()) || knownFiles.Contains(fileName))
+                    {
+                        continue;
+                    }
+
+                    DiTModelMap[fileName] = fileName;
+                    knownFiles.Add(fileName);
+                    discoveredCount++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logs.Debug($"SeedVR2: Could not scan ComfyUI model directory {comfyDir}: {ex.Message}");
+            }
         }
 
         if (discoveredCount > 0)
         {
-            Logs.Info($"SeedVR2: Discovered {discoveredCount} additional model(s) in {modelDir}");
+            Logs.Info($"SeedVR2: Discovered {discoveredCount} additional model(s) across all directories");
         }
     }
 
-    /// <summary>Gets the list of model dropdown values, including discovered models.</summary>
+    /// <summary>Returns a download status suffix for a model filename.</summary>
+    private static string GetModelStatusSuffix(string filename)
+    {
+        if (IsModelDownloaded(filename))
+        {
+            return " [Downloaded]";
+        }
+        if (IsModelPartiallyDownloaded(filename))
+        {
+            return " [Downloading...]";
+        }
+        return " [Not Downloaded]";
+    }
+
+    /// <summary>Gets the list of model dropdown values, including discovered models, with download status annotations.</summary>
     public static List<string> GetModelDropdownValues()
     {
-        List<string> values =
-        [
-            // Presets (auto-configure settings)
-            "seedvr2-auto///Auto (VRAM-based)",
-            "seedvr2-preset-fast///Preset: Fast (3B Q4)",
-            "seedvr2-preset-balanced///Preset: Balanced (3B FP8)",
-            "seedvr2-preset-quality///Preset: Quality (7B FP8)",
-            "seedvr2-preset-max///Preset: Max Quality (7B Sharp FP16)",
-            // 3B Models - Faster, lower VRAM
-            "seedvr2-3b-fp16///3B FP16 (Best quality, ~16GB)",
-            "seedvr2-3b-fp8///3B FP8 (Good quality, ~12GB)",
-            "seedvr2-3b-q8///3B GGUF Q8 (Good quality, ~10GB)",
-            "seedvr2-3b-q4///3B GGUF Q4 (Acceptable quality, ~8GB)",
-            // 7B Models - Higher quality, higher VRAM
-            "seedvr2-7b-fp16///7B FP16 (Best quality, ~28GB)",
-            "seedvr2-7b-fp8///7B FP8 Mixed (Good quality, ~20GB)",
-            "seedvr2-7b-q4///7B GGUF Q4 (Acceptable quality, ~12GB)",
-            // 7B Sharp Models - Enhanced detail
-            "seedvr2-7b-sharp-fp16///7B Sharp FP16 (Best detail, ~28GB)",
-            "seedvr2-7b-sharp-fp8///7B Sharp FP8 Mixed (Good detail, ~20GB)",
-            "seedvr2-7b-sharp-q4///7B Sharp GGUF Q4 (Acceptable detail, ~12GB)",
-        ];
+        // Re-scan in case new models were downloaded since last check
+        ScanForDiscoveredModels();
+
+        // Build base entries with status annotations
+        // Format: "key///Label [Status]" where key is model key and label is human-readable
+        var rawEntries = new (string Key, string Label, string ModelKey)[]
+        {
+            // Presets - status comes from their underlying model
+            ("seedvr2-auto", "Auto (VRAM-based, downloaded only)", null),
+            ("seedvr2-preset-fast", "Preset: Fast (3B Q4)", "seedvr2-3b-q4"),
+            ("seedvr2-preset-balanced", "Preset: Balanced (3B FP8)", "seedvr2-3b-fp8"),
+            ("seedvr2-preset-quality", "Preset: Quality (7B FP8)", "seedvr2-7b-fp8"),
+            ("seedvr2-preset-max", "Preset: Max Quality (7B Sharp FP16)", "seedvr2-7b-sharp-fp16"),
+            // 3B Models
+            ("seedvr2-3b-fp16", "3B FP16 (Best quality, ~16GB)", "seedvr2-3b-fp16"),
+            ("seedvr2-3b-fp8", "3B FP8 (Good quality, ~12GB)", "seedvr2-3b-fp8"),
+            ("seedvr2-3b-q8", "3B GGUF Q8 (Good quality, ~10GB)", "seedvr2-3b-q8"),
+            ("seedvr2-3b-q4", "3B GGUF Q4 (Acceptable quality, ~8GB)", "seedvr2-3b-q4"),
+            // 7B Models
+            ("seedvr2-7b-fp16", "7B FP16 (Best quality, ~28GB)", "seedvr2-7b-fp16"),
+            ("seedvr2-7b-fp8", "7B FP8 Mixed (Good quality, ~20GB)", "seedvr2-7b-fp8"),
+            ("seedvr2-7b-q4", "7B GGUF Q4 (Acceptable quality, ~12GB)", "seedvr2-7b-q4"),
+            // 7B Sharp Models
+            ("seedvr2-7b-sharp-fp16", "7B Sharp FP16 (Best detail, ~28GB)", "seedvr2-7b-sharp-fp16"),
+            ("seedvr2-7b-sharp-fp8", "7B Sharp FP8 Mixed (Good detail, ~20GB)", "seedvr2-7b-sharp-fp8"),
+            ("seedvr2-7b-sharp-q4", "7B Sharp GGUF Q4 (Acceptable detail, ~12GB)", "seedvr2-7b-sharp-q4"),
+        };
+
+        List<string> values = [];
+        foreach (var (key, label, modelKey) in rawEntries)
+        {
+            if (modelKey is null)
+            {
+                // Auto entry - no status annotation
+                values.Add($"{key}///{label}");
+            }
+            else
+            {
+                string filename = ResolveModelFilename(modelKey);
+                string status = GetModelStatusSuffix(filename);
+                values.Add($"{key}///{label}{status}");
+            }
+        }
 
         // Add discovered models (where key == value, meaning user-added files)
         HashSet<string> staticKeys = new(values.Select(v => v.Before("///")));
         foreach (var kvp in DiTModelMap.Where(kvp => kvp.Key == kvp.Value && !staticKeys.Contains(kvp.Key)))
         {
             string displayName = Path.GetFileNameWithoutExtension(kvp.Key);
-            values.Add($"{kvp.Key}///{displayName} (User Model)");
+            string status = GetModelStatusSuffix(kvp.Value);
+            values.Add($"{kvp.Key}///{displayName} (User Model){status}");
         }
 
         return values;
@@ -235,6 +363,35 @@ public class SeedVR2UpscalerExtension : Extension
     public static string ResolveModelFilename(string modelKey)
     {
         return DiTModelMap.TryGetValue(modelKey, out string ditModel) ? ditModel : modelKey;
+    }
+
+    /// <summary>
+    /// Pre-flight check: throws a clear error if the model file is not downloaded.
+    /// Skips validation when no self-start backend exists (remote backends may have the model).
+    /// </summary>
+    public static void ValidateModelExists(string filename)
+    {
+        if (IsModelDownloaded(filename))
+        {
+            return;
+        }
+
+        // If no self-start backend is running, we can't be sure what's available remotely - skip
+        if (!Program.Backends.RunningBackendsOfType<ComfyUISelfStartBackend>().Any())
+        {
+            Logs.Info($"SeedVR2: Cannot verify model '{filename}' exists (no local ComfyUI backend). Proceeding assuming remote backend has it.");
+            return;
+        }
+
+        string dirs = string.Join("\n  - ", GetAllModelDirectories());
+        string partialNote = IsModelPartiallyDownloaded(filename)
+            ? $"\n\nNote: A partial download '{filename}.download' was found - the download may still be in progress or was interrupted."
+            : "";
+
+        throw new SwarmUserErrorException(
+            $"SeedVR2 model '{filename}' is not downloaded.\n\n" +
+            $"Searched directories:\n  - {dirs}\n\n" +
+            $"Please download this model manually or select a different model in the SeedVR2 settings.{partialNote}");
     }
 
     /// <inheritdoc/>
@@ -558,67 +715,93 @@ public class SeedVR2UpscalerExtension : Extension
 
     /// <summary>Detects available GPU VRAM and returns the best model configuration.</summary>
     /// <returns>Tuple of (modelKey, blockSwap, tiledVAE) based on detected VRAM.</returns>
+    /// <summary>Priority-ordered model fallback list for auto-selection, from highest to lowest quality.</summary>
+    private static readonly (string ModelKey, int BlockSwap, bool TiledVAE)[] ModelPreferenceOrder =
+    [
+        ("seedvr2-7b-sharp-fp16", 0, false),
+        ("seedvr2-7b-sharp-fp8", 8, false),
+        ("seedvr2-7b-sharp-q4", 16, true),
+        ("seedvr2-7b-fp16", 0, false),
+        ("seedvr2-7b-fp8", 8, false),
+        ("seedvr2-7b-q4", 16, true),
+        ("seedvr2-3b-fp16", 0, false),
+        ("seedvr2-3b-fp8", 12, true),
+        ("seedvr2-3b-q8", 12, true),
+        ("seedvr2-3b-q4", 20, true),
+    ];
+
     public static (string ModelKey, int BlockSwap, bool TiledVAE) DetectVRAMAndSelectModel()
     {
+        // Determine ideal model by VRAM tier
+        (string idealKey, int idealBlockSwap, bool idealTiledVAE) idealSelection;
         try
         {
             NvidiaUtil.NvidiaInfo[] gpus = NvidiaUtil.QueryNvidia();
             if (gpus is null || gpus.Length == 0)
             {
-                Logs.Warning("SeedVR2 Auto: Could not detect GPU VRAM, defaulting to 3B FP8 with block swap");
-                return ("seedvr2-3b-fp8", 16, true);
-            }
-
-            // Use the GPU with most VRAM
-            NvidiaUtil.NvidiaInfo bestGpu = gpus.OrderByDescending(g => g.TotalMemory.InBytes).First();
-            double vramGiB = bestGpu.TotalMemory.GiB;
-
-            Logs.Info($"SeedVR2 Auto: Detected GPU '{bestGpu.GPUName}' with {vramGiB:F1} GiB VRAM");
-
-            // Select model based on VRAM thresholds
-            // Note: These are conservative estimates accounting for base model already loaded
-            if (vramGiB >= 24)
-            {
-                // 24GB+: Can run 7B Sharp FP16 without block swap
-                Logs.Info("SeedVR2 Auto: Selected 7B Sharp FP16 (max quality)");
-                return ("seedvr2-7b-sharp-fp16", 0, false);
-            }
-            else if (vramGiB >= 20)
-            {
-                // 20-24GB: 7B FP8 with light block swap
-                Logs.Info("SeedVR2 Auto: Selected 7B FP8 with block swap 8");
-                return ("seedvr2-7b-fp8", 8, false);
-            }
-            else if (vramGiB >= 16)
-            {
-                // 16-20GB: 7B Q4 or 3B FP16 with block swap
-                Logs.Info("SeedVR2 Auto: Selected 7B Q4 with block swap 16");
-                return ("seedvr2-7b-q4", 16, true);
-            }
-            else if (vramGiB >= 12)
-            {
-                // 12-16GB: 3B FP8 with moderate block swap
-                Logs.Info("SeedVR2 Auto: Selected 3B FP8 with block swap 12");
-                return ("seedvr2-3b-fp8", 12, true);
-            }
-            else if (vramGiB >= 8)
-            {
-                // 8-12GB: 3B Q4 with heavy block swap
-                Logs.Info("SeedVR2 Auto: Selected 3B Q4 with block swap 20");
-                return ("seedvr2-3b-q4", 20, true);
+                Logs.Warning("SeedVR2 Auto: Could not detect GPU VRAM, ideal target is 3B FP8 with block swap");
+                idealSelection = ("seedvr2-3b-fp8", 16, true);
             }
             else
             {
-                // <8GB: 3B Q4 with maximum block swap, tiled VAE
-                Logs.Warning($"SeedVR2 Auto: Low VRAM ({vramGiB:F1} GiB) - using 3B Q4 with maximum optimization");
-                return ("seedvr2-3b-q4", 28, true);
+                // Use the GPU with most VRAM
+                NvidiaUtil.NvidiaInfo bestGpu = gpus.OrderByDescending(g => g.TotalMemory.InBytes).First();
+                double vramGiB = bestGpu.TotalMemory.GiB;
+
+                Logs.Info($"SeedVR2 Auto: Detected GPU '{bestGpu.GPUName}' with {vramGiB:F1} GiB VRAM");
+
+                idealSelection = vramGiB switch
+                {
+                    >= 24 => ("seedvr2-7b-sharp-fp16", 0, false),
+                    >= 20 => ("seedvr2-7b-fp8", 8, false),
+                    >= 16 => ("seedvr2-7b-q4", 16, true),
+                    >= 12 => ("seedvr2-3b-fp8", 12, true),
+                    >= 8  => ("seedvr2-3b-q4", 20, true),
+                    _     => ("seedvr2-3b-q4", 28, true),
+                };
             }
         }
         catch (Exception ex)
         {
-            Logs.Warning($"SeedVR2 Auto: Error detecting VRAM: {ex.Message}, defaulting to 3B FP8");
-            return ("seedvr2-3b-fp8", 16, true);
+            Logs.Warning($"SeedVR2 Auto: Error detecting VRAM: {ex.Message}, ideal target is 3B FP8");
+            idealSelection = ("seedvr2-3b-fp8", 16, true);
         }
+
+        // Check if the ideal model is actually downloaded
+        string idealFilename = ResolveModelFilename(idealSelection.idealKey);
+        if (IsModelDownloaded(idealFilename))
+        {
+            Logs.Info($"SeedVR2 Auto: Selected {idealSelection.idealKey} (downloaded, ideal for VRAM)");
+            return idealSelection;
+        }
+
+        // Ideal model not downloaded - walk fallback list and pick the best available
+        Logs.Warning($"SeedVR2 Auto: Ideal model {idealSelection.idealKey} ({idealFilename}) is not downloaded. Searching for best available alternative...");
+        foreach (var (modelKey, blockSwap, tiledVAE) in ModelPreferenceOrder)
+        {
+            string filename = ResolveModelFilename(modelKey);
+            if (IsModelDownloaded(filename))
+            {
+                Logs.Info($"SeedVR2 Auto: Falling back to {modelKey} ({filename}) - best available downloaded model");
+                return (modelKey, blockSwap, tiledVAE);
+            }
+        }
+
+        // Also check discovered user models
+        foreach (var kvp in DiTModelMap.Where(kvp => kvp.Key == kvp.Value))
+        {
+            if (IsModelDownloaded(kvp.Value))
+            {
+                Logs.Info($"SeedVR2 Auto: Falling back to user model {kvp.Value}");
+                return (kvp.Key, 12, true);
+            }
+        }
+
+        // Nothing downloaded at all
+        string allDirs = string.Join(", ", GetAllModelDirectories());
+        throw new SwarmUserErrorException(
+            $"SeedVR2 Auto: No SeedVR2 models are downloaded. " +
+            $"Please download at least one model to one of these directories: {allDirs}");
     }
 
     /// <summary>Returns true if the current generation request is producing video output.</summary>
@@ -749,6 +932,7 @@ public class SeedVR2UpscalerExtension : Extension
 
         // Get the actual model filename
         string ditModel = ResolveModelFilename(modelKey);
+        ValidateModelExists(ditModel);
 
         // Calculate target resolution based on upscale factor
         double upscaleFactor = g.UserInput.Get(T2IParamTypes.RefinerUpscale, 1.0);
@@ -1090,6 +1274,7 @@ public class SeedVR2UpscalerExtension : Extension
 
         // Get actual model filename
         string ditModel = ResolveModelFilename(modelKey);
+        ValidateModelExists(ditModel);
 
         // Calculate target resolution based on upscale factor or direct resolution setting
         double seedvrUpscaleBy = g.UserInput.Get(SeedVR2UpscaleBy, 1.5);
@@ -1444,6 +1629,7 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         string ditModel = ResolveModelFilename(modelKey);
+        ValidateModelExists(ditModel);
 
         // Get resolution settings - use SeedVR2UpscaleBy to calculate target
         double seedvrUpscaleBy = g.UserInput.Get(SeedVR2UpscaleBy, 2.0);  // Default 2x for video
@@ -1712,6 +1898,7 @@ public class SeedVR2UpscalerExtension : Extension
 
         // Get the actual model filename
         string ditModel = ResolveModelFilename(modelKey);
+        ValidateModelExists(ditModel);
 
         // Calculate target resolution based on upscale factor
         double upscaleFactor = g.UserInput.Get(T2IParamTypes.RefinerUpscale, 1.0);

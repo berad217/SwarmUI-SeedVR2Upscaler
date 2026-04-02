@@ -167,11 +167,20 @@ public class SeedVR2UpscalerExtension : Extension
         {
             foreach (ComfyUISelfStartBackend backend in Program.Backends.RunningBackendsOfType<ComfyUISelfStartBackend>())
             {
+                // ComfyPathBase may be relative (e.g. "dlbackend/comfy/ComfyUI") - resolve to absolute
+                string comfyBase = Path.GetFullPath(backend.ComfyPathBase);
                 // ComfyUI's Python node uses SEEDVR2 (uppercase) as the folder name
-                string comfyDir = Path.Combine(backend.ComfyPathBase, "models", "SEEDVR2");
+                string comfyDir = Path.Combine(comfyBase, "models", "SEEDVR2");
                 if (Directory.Exists(comfyDir) && !dirs.Contains(comfyDir, StringComparer.OrdinalIgnoreCase))
                 {
                     dirs.Add(comfyDir);
+                }
+                // Also check lowercase variant in case the folder was created differently
+                string comfyDirLower = Path.Combine(comfyBase, "models", "seedvr2");
+                if (Directory.Exists(comfyDirLower) && !comfyDirLower.Equals(comfyDir, StringComparison.OrdinalIgnoreCase)
+                    && !dirs.Contains(comfyDirLower, StringComparer.OrdinalIgnoreCase))
+                {
+                    dirs.Add(comfyDirLower);
                 }
             }
         }
